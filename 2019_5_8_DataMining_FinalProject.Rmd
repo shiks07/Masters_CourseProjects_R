@@ -1,0 +1,738 @@
+---
+title: "Flight Delay Classification Project"
+author: "Mean Girls : Shikha Goel, Katherine Minor, Muriel Pokol"
+date: "Project Due: May 8, 2019"
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+    theme: cerulean
+    highlight: tango
+---
+
+### Introduction: Flight Data
+
+####This data is an extract from the Airline On-Time Performance Data made available through the Bureau of Transportation Statistics of the U.S. Department of Transportation.  This data specifically is a subset of air traffic through the PIT airport from the year 2018 and gives provides a lot of information of flights flying in and out of Pittsburgh inlcuding any arrival and departure delays regarding flight delays.
+
+### Objective and Methodology 
+
+####The objective of our project is to build a classification model that predicts whether a flight flying out of Pittsburgh will have a delayed arrival at the destination.   
+
+####The Methodology followed by our team is outlined below :
+- 1. Conduct exploratory data analysis on the data set to identify interesting relationships while helping us get familiar withthe dataset and understand the information better. 
+- 2. Scan the data for missing values and remove variables that are mostly null.
+- 3. Feature Selection : Use l-1 regularized logistic regression and RandomForest for Feature Selection
+- 4. Create training and test data for our final subset of features
+- 5. Model Fits: Fit various classification models on the training data. We used Logistic Regression, LDA, QDA, Naive Bayes and Random Forests
+- 6. Model Selection : Compute classification metrics and display confusion matrices that would allow us to select the best model based on performance using the test data
+- 7. Fit the best model on the entire data set -  this is pur final prediction model. 
+- 8. Use this model to make comparisons with the 2006 data. 
+
+```{r, echo=FALSE}
+library(ggplot2)
+library(plyr)
+library(ISLR)
+library(knitr)
+library(glmnet)
+library(leaps)
+library(boot)
+library(MASS)
+library(klaR)
+library(gam)
+library(partykit)
+library(caret)
+library(rpart)
+library(randomForest)
+library(pROC)
+```
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(warning = FALSE)
+
+```
+
+
+
+
+###Data Cleaning
+
+```{r}
+# Read in the data
+all.pit.2018 <- read.csv("all_PIT_2018.csv")
+
+# Use a for loop to determine columns that which columns should be dropped at the offset
+column.names <- names(all.pit.2018)
+
+for (i in 1:length(column.names)){
+  cat("Number of NAs in", column.names[i], "is",    
+      sum(is.na(all.pit.2018[,column.names[i]])),"\n", sep = " ")
+}
+
+# Drop those unnecesary columns with 70% or more of observations as NAs.
+all.pit.2018 <- all.pit.2018[,-which(names(all.pit.2018) %in%
+                                  c("SCH_OP_UNIQUE_CARRIER","SCH_OP_CARRIER_AIRLINE_ID",
+                                 "SCH_OP_CARRIER","SCH_OP_CARRIER_FL_NUM",
+                                 "CARRIER_DELAY","WEATHER_DELAY","NAS_DELAY",
+                                "SECURITY_DELAY","LATE_AIRCRAFT_DELAY","CANCELLATION_CODE",
+                                 "X", "X.1", "DUP"))]
+
+# Subset data to get only rows where the destination is Pittsburgh
+all.pit.2018 <- subset(all.pit.2018, ORIGIN == "PIT")
+
+# Omit all remaining rows that contain NAs
+all.pit.2018 <- na.omit(all.pit.2018)
+```
+
+### Exploratory Data Analysis
+
+```{r Histograms}
+# Departing Delays histogram
+ggplot(subset(all.pit.2018, DEP_DELAY > -25 & DEP_DELAY < 200), 
+       aes(DEP_DELAY, fill = "Orange")) +
+  geom_histogram(binwidth = 2, color = "White") + 
+  labs(title = "Freq of Departing Delay Lengths", 
+       x = "Dep. Delays (minutes)")
+
+# Arrival Delays histogram
+ggplot(subset(all.pit.2018, ARR_DELAY > -50 & ARR_DELAY < 200), 
+       aes(ARR_DELAY, fill = "Orange")) + 
+  geom_histogram(binwidth = 2, color = "White") +
+  labs(title = "Freq of Arrival Delay Lengths", 
+       x = "Arr. Delays (minutes)")
+```
+
+Here we create two histograms, one for departing delays and one for arrival delays.  Each histogram bins by how many delays of that magnitude there were at the PIT airport in 2018.  We see that most flights were not delayed, but we see that arrival delays have a greater spread than departing delays, and when arrival delays occur they tend to be longer.
+
+#### Breakdown of Arrival Delays
+
+> Here the arrival delays are broken down by different time frames.
+
+```{r Arr Delays per Quarter}
+ggplot(all.pit.2018, 
+       aes(x = QUARTER, y = ARR_DELAY, group = QUARTER, color = "Orange")) + 
+  geom_boxplot() + 
+  coord_flip() + 
+  labs(title = "Arrival Delay Lengths per Quarter", 
+       x = "Arr. Delays (minutes)")
+```
+
+```{r Arr Delays per Month}
+ggplot(all.pit.2018,
+       aes(MONTH, ARR_DELAY)) + 
+  geom_jitter(color = "coral1") + 
+  scale_x_discrete() + 
+  labs(title = "Arrival Delay Lengths per Month", 
+       y = "Arr. Delays (minutes)")
+```
+
+```{r Arr Delays per Day of Week}
+ggplot(all.pit.2018,
+       aes(DAY_OF_WEEK, ARR_DELAY)) + 
+  geom_jitter(color = "coral1") + 
+  scale_x_discrete() +
+  labs(title = "Arrival Delay Lengths per Day of Week", 
+       y = "Arr. Delays (minutes)")
+```
+
+There appears to be very little information to gain from looking at arrival delays by different time periods.  The frequency of the arrival delays, as well as the time of arrival delays, appear to be relatively evenly spread accross quarters, months, and days of the week.
+
+####Delays by Airtime
+
+```{r Departure Delays by Airtime}
+ggplot(subset(all.pit.2018, AIR_TIME > -500), 
+       aes(AIR_TIME, DEP_DELAY)) + 
+  geom_jitter(color = "coral1") +
+  guides(color = FALSE) +
+  labs(title = "Departure Delay Lengths per Air Time", 
+       x = "Air Time (minutes)", 
+       y = "Dep. Delays (minutes)")
+```
+
+```{r Arrival Delays by Airtime}
+ggplot(subset(all.pit.2018, AIR_TIME > -500), 
+       aes(AIR_TIME, ARR_DELAY)) + 
+  geom_jitter(color = "coral1") + 
+  labs(title = "Arrival Delay Lengths per Air Time", 
+       x = "Air Time (minutes)", 
+       y = "Arr. Delays (minutes)")
+```
+
+
+Both departing and arrival delays appear to be more frequent when the airtime is less than 200, with a small spike greater than 200 but a dip in frequency at the 200 airtime minute mark.  Our assumption is that for our dataset of domestic flights, too short of a flight does not allow for the pilot to "make up time" in the air, while a longer flight is more likley to be delayed because of a greater likelihood of running into turbulance or bad weather during the fligt because the plane simply has more ground to cover.
+
+
+####Arrival Delays V/s Departure Delay
+
+```{r Arr. Delays and Dep. Delays}
+ggplot(all.pit.2018,
+       aes(ARR_DELAY, DEP_DELAY)) + 
+  geom_jitter(color = "coral1") +
+  stat_smooth(method = "lm", col = "black", 
+              formula = y~poly(x, 2), 
+              data = all.pit.2018) +
+  guides(color = FALSE) +
+  labs(title = "Departing Delay and Arrival Delay")
+```
+
+Departing delays and arrival delays appear to be highly correlated, and based on this exploratory analysis we expect to see this relationship represented in our models below.
+
+
+
+#### Correlation Matrices
+
+> Here are different correlation matrices for sections of the data to determine which variables are colinear.  The data was broken down into sections based on logical relationships between the columns for the purpose of readability.
+
+**Correlation Matrix for data regarding the origin airport of the plane:**
+```{r, cache= TRUE, fig.width = 14, fig.height = 12}
+pairs(~ ORIGIN_AIRPORT_ID + 
+        ORIGIN_AIRPORT_SEQ_ID + 
+        ORIGIN_CITY_MARKET_ID + 
+        ORIGIN + 
+        ORIGIN_CITY_NAME + 
+        ORIGIN_STATE_ABR + 
+        ORIGIN_STATE_FIPS + 
+        ORIGIN_STATE_NM + 
+        ORIGIN_STATE_NM + 
+        ORIGIN_WAC, 
+      data = all.pit.2018)
+```
+Because all of the planes originate from PIT, all of the origin-based predictors are the same. This correlation matrix is confirmation that these predictors can be removed from the dataframe used to predict arrival delays.
+
+**Correlation Matrix for data regarding the destination airport of the plane:**
+```{r, cache = TRUE,fig.width = 14, fig.height = 12}
+pairs(~ DEST_AIRPORT_ID + 
+        DEST_AIRPORT_SEQ_ID + 
+        DEST_CITY_MARKET_ID + 
+        DEST + 
+        DEST_CITY_NAME + 
+        DEST_STATE_ABR + 
+        DEST_STATE_FIPS + 
+        DEST_STATE_NM + 
+        DEST_STATE_NM + 
+        DEST_WAC, 
+      data = all.pit.2018)
+```
+Beccause of such high correlations between variables among destination classifiers, implying colinearity, only DET, DEST_CITY_MARKET_ID, DEST_STATE_ABR, DEST_WAC will be chosen to use in the dataframe used to predict arrival delays.
+
+**Correlation Matrix for data regarding the departing time and delays of the plane:**
+```{r, cache=TRUE, fig.width = 14, fig.height = 12}
+pairs(~ CRS_DEP_TIME + 
+        DEP_TIME + 
+        DEP_DELAY + 
+        DEP_DELAY_NEW + 
+        DEP_DEL15 + 
+        DEP_DELAY_GROUP + 
+        DEP_TIME_BLK + 
+        TAXI_OUT + 
+        WHEELS_OFF,
+      data = all.pit.2018)
+```
+Because of the colinearity between Departure Delay information, only Departure Delay will be kept to use in the dataframe used to predict arrival delays.  Departure Time and Taxi-Out will be chosen to be used in predicting arrival delays as well.
+
+**Correlation Matrix for data regarding the arrival time and delays of the plane:**
+```{r, cahce =TRUE, fig.width = 14, fig.height = 12}
+pairs(~ CRS_ARR_TIME + 
+        ARR_TIME + 
+        ARR_DELAY + 
+        ARR_DELAY_NEW + 
+        ARR_DEL15 + 
+        ARR_DELAY_GROUP + 
+        ARR_TIME_BLK + 
+        TAXI_IN + 
+        WHEELS_ON,
+      data = all.pit.2018)
+```
+
+There is very high correlation, implicating colinearity, between the different classifications of arrival delays.  Becuase we are hoping to determine whether a flight's arrival will be delayed by 15 minutes or more, only Arr_Delay15 will be used in the dataframe predicting arrival delays.  All other predictors here are not possible to know until the flight has actually landed at its destination.
+
+**Correlation Matrix for data regarding flight scheduling information:**
+```{r, cache = TRUE, fig.width = 14, fig.height = 12}
+pairs(~ YEAR + 
+        MONTH + 
+        DAY_OF_MONTH + 
+        DAY_OF_WEEK + 
+        FL_DATE,
+      data = all.pit.2018)
+```
+
+
+Because all flights occur in 2018 here, year will be removed from the dataset used in predicting flight delays.  Flight date is removed due to unnecessary overfitting.  The predictors Month, Day of Month, and Day of Week are chosen to use in the dataframe predicting arrival delays.
+
+
+
+```{r, cache = TRUE, fig.width = 14, fig.height = 12}
+pairs(~ MKT_UNIQUE_CARRIER + 
+        BRANDED_CODE_SHARE + 
+        MKT_CARRIER_AIRLINE_ID + 
+        MKT_CARRIER +
+        MKT_CARRIER_FL_NUM +
+        ORIGIN_AIRPORT_ID +
+        OP_UNIQUE_CARRIER +
+        OP_CARRIER_AIRLINE_ID +
+        OP_CARRIER +
+        TAIL_NUM +
+        OP_CARRIER_FL_NUM,
+      data = all.pit.2018)
+```
+
+Because of high correlation, again implicating colinearity between the different identification numbers for carriers and airlines.  Flight Number and Tail Number are removed due to overfitting.  MKT Carrier, MKT Carrier Airline ID, and OP Carrier are chosen to use in the dataframe predicting arrival delays.
+
+
+```{r,cache = TRUE, fig.width = 14, fig.height = 12}
+pairs(~ CANCELLED +
+        DIVERTED +
+        CRS_ELAPSED_TIME +
+        ACTUAL_ELAPSED_TIME +
+        AIR_TIME +
+        FLIGHTS +
+        DISTANCE +
+        DISTANCE_GROUP,
+      data = all.pit.2018)
+```
+Only Airtime and Distance will be chosen to use in the dataframe predicting arrival time, as all other predictors here are very highly correlated or, in the case of diverted or cancelled, irrelevant to our goal of predicting arrival delays.
+
+###Feature Selection
+
+(Note : the two different subsets below are due to slight differences in the selection of Variables that had names as well as IDs. example : DEST and DEST_AIRPORT_ID). The data set referred to as "with names" was created only for classification trees to facilitate ease of read.)
+
+```{r }
+# Subset to only columns that are uniquely relevant based on the correlation matrices
+all.pit.2018.names <- all.pit.2018[,which(names(all.pit.2018) %in%
+                                  c("AIR_TIME",
+                                    "DISTANCE",
+                                    "DEST",
+                                    "DEST_CITY_MARKET_ID",
+                                    "DEST_STATE_ABR",
+                                    "DEST_WAC",
+                                    "DEP_DELAY",
+                                    "QUARTER",
+                                    "ARR_DEL15",
+                                    "DEP_TIME",
+                                    "TAXI_OUT",
+                                    "MONTH",
+                                    "DAY_OF_MONTH",
+                                    "DAY_OF_WEEK",
+                                    "MKT_CARRIER",
+                                    "MKT_CARRIER_AIRLINE_ID",
+                                    "OP_CARRIER"))]
+```
+
+```{r}
+# Subset to only columns that are uniquely relevant based on the correlation matrices
+all.pit.2018.nums <- all.pit.2018[,which(names(all.pit.2018) %in%
+                                  c("AIR_TIME",
+                                    "DISTANCE",
+                                    "DEST_AIRPORT_ID",
+                                    "DEST_CITY_MARKET_ID",
+                                    "DEST_STATE_FIPS ",
+                                    "DEST_WAC",
+                                    "DEP_DELAY",
+                                    "ARR_DEL15",
+                                    "DEP_TIME",
+                                    "TAXI_OUT",
+                                    "MONTH",
+                                    "DAY_OF_MONTH",
+                                    "DAY_OF_WEEK",
+                                    "QUARTER",
+                                    #"MKT_CARRIER",
+                                    "MKT_CARRIER_AIRLINE_ID"))]
+                                    #"OP_CARRIER"
+```
+
+#### FS Lasso Logistic: Feature Selection
+After reducing columns in data from colinearity, we ran two methods to determine feature selection for the classification fits.  First we ran a Lasso Logistic and second a Random Forrest fit.  We then compared the results of each to determine which features were of high predictive quality.
+
+```{r, cache = TRUE}
+# Extract covariates matrix (for lasso)
+flight.x <- as.matrix(all.pit.2018.nums[, -which(names(all.pit.2018.nums) == "ARR_DEL15")])
+
+# Extract response variable (for lasso)
+flight.y <- all.pit.2018.nums$ARR_DEL15
+
+#Code for Lasso Fit
+flight.lasso <- glmnet(x = flight.x, y = flight.y, family = "binomial")
+
+flight.lasso.cv.log <- cv.glmnet(x = flight.x, y = flight.y, family = "binomial")
+plot(flight.lasso.cv.log)
+
+minlam <- flight.lasso.cv.log$lambda.min
+coef(flight.lasso, s = minlam)
+
+oneselam <- flight.lasso.cv.log$lambda.1se
+
+coef(flight.lasso, s = oneselam)
+
+```
+
+
+
+#### Random Forest: Feature Selection
+
+```{r, cache = TRUE,fig.height = 12, fig.width = 12}
+# Generate a random forest based on the flight training data
+all.pit.2018.rf <- randomForest(as.factor(ARR_DEL15) ~ ., all.pit.2018.names)
+print(all.pit.2018.rf)
+
+# Plot important variables
+varImpPlot(all.pit.2018.rf)
+```
+
+
+Based on the comparison of the Lasso feature selection and the Random Forest feature selection, we can confirm that Departure Delay, Taxi-Out, Air Time, Distance, Departing Time, Destination Airport, Day of Month, and Day of Week are all important predictors.  For Carrier Airline ID and City Market ID, both feature selection methods were able to rule those out.  Because Destination FIPS, WAC, Quarter and Month were not clearly able to be ruled out, our final list of features will include them for our final training and testing data sets.
+
+
+```{r }
+# Subset to only columns that are uniquely relevant based on the correlation matrices
+all.pit.2018.names <- all.pit.2018[,which(names(all.pit.2018) %in%
+                                  c("AIR_TIME",
+                                    "DISTANCE",
+                                    "DEST",
+                                    "DEST_STATE_ABR",
+                                    "DEST_WAC",
+                                    "DEP_DELAY",
+                                    "QUARTER",
+                                    "ARR_DEL15",
+                                    "DEP_TIME",
+                                    "TAXI_OUT",
+                                    "MONTH",
+                                    "DAY_OF_MONTH",
+                                    "DAY_OF_WEEK"))]
+```
+
+```{r}
+# Subset to only columns that are uniquely relevant based on the correlation matrices
+all.pit.2018.nums <- all.pit.2018[,which(names(all.pit.2018) %in%
+                                  c("AIR_TIME",
+                                    "DISTANCE",
+                                    "DEST_AIRPORT_ID",
+                                    "DEST_STATE_FIPS ",
+                                    "DEST_WAC",
+                                    "DEP_DELAY",
+                                    "ARR_DEL15",
+                                    "DEP_TIME",
+                                    "TAXI_OUT",
+                                    "MONTH",
+                                    "DAY_OF_MONTH",
+                                    "DAY_OF_WEEK",
+                                    "QUARTER"))]
+```
+
+
+# Training and Testing Data
+
+```{r Create Train/Test Data (w/ Names)}
+set.seed(531)
+
+# Randomly select 20% of the data to be held out for model validation
+names.test.indexes <- sample(1:nrow(all.pit.2018.names), 
+                       round(0.2 * nrow(all.pit.2018.names)))
+names.train.indexes <- setdiff(1:nrow(all.pit.2018.names), names.test.indexes)
+
+# Just pull the covar
+all.pit.2018.names.train <- all.pit.2018.names[names.train.indexes, 1:ncol(all.pit.2018.names)]
+all.pit.2018.names.test <- all.pit.2018.names[names.test.indexes, 1:ncol(all.pit.2018.names)]
+```
+
+```{r Create Train/Test Data (w/ Numbers)}
+set.seed(531)
+
+# Randomly select 20% of the data to be held out for model validation
+nums.test.indexes <- sample(1:nrow(all.pit.2018.nums), 
+                       round(0.2 * nrow(all.pit.2018.nums)))
+nums.train.indexes <- setdiff(1:nrow(all.pit.2018.nums), nums.test.indexes)
+
+# Put all the information based on the above indices into two separate data sets 
+all.pit.2018.nums.train <- all.pit.2018.nums[nums.train.indexes, 1:ncol(all.pit.2018.nums)]
+all.pit.2018.nums.test <- all.pit.2018.nums[nums.test.indexes, 1:ncol(all.pit.2018.nums)]
+```
+
+### Model Selection
+
+
+> In this section we take the training data and fit various classification models. The models we considered are : Logistic Regression, Linear Discriminant Analysis (LDA), Quadratic Discriminant Analysis(QDA), Naive Bayes, Pruned Trees and Random Forests. Due to a large number of predictor variables we chose not to use K-Nearest Neighbors.
+
+####Decision Trees
+
+
+```{r Pruned Tree, fig.height = 12, fig.width = 12}
+# Create a full tree and plot out its complexity parameter graph
+all.pit.2018.full <- rpart(ARR_DEL15 ~ ., data = all.pit.2018.names.train, 
+                        control = rpart.control(minsplit=100, cp=0.002))
+plotcp(all.pit.2018.full)
+
+# Prune and plot the tree
+all.pit.2018.pruned <- prune(all.pit.2018.full, cp = 0.0033)
+all.pit.2018.pruned.party <- as.party(all.pit.2018.pruned)
+plot(all.pit.2018.pruned.party, gp = gpar(fontsize = 10))
+```
+
+Looking here at a fully grown and pruned tree, we see that Departure Delay and taxi-out time are both incredibly important indicators of whether a flight will have a delayed arrival time. However, we do see air time and destination as relevant factors but not as important as Departure Delay.
+
+```{r Random Forest, fig.height = 12, fig.width = 12}
+# Generate a random forest based on the flight training data
+all.pit.2018.rf <- randomForest(as.factor(ARR_DEL15) ~ ., all.pit.2018.names.train)
+print(all.pit.2018.rf)
+
+# Plot important variables
+varImpPlot(all.pit.2018.rf)
+```
+
+Here a random forest is generated from our training data.  Departure Delay is much more important than the other predictors, but taxi-out time, departure time, and air time are other noteworthy factors.  
+
+```{r ROC Curve Comparisons}
+# For Random Forest, find the probability that a flight is delayed in the test data, based on our predictive model
+all.pit.2018.rf.prob <- predict(all.pit.2018.rf, all.pit.2018.names.test, type = "prob")
+all.pit.2018.rf.probyes <- all.pit.2018.rf.prob[, 2]
+
+# For Pruned Tree, find the probability that a flight is delayed in the test data, based on our predictive model
+all.pit.2018.pruned.prob <- predict(all.pit.2018.pruned, all.pit.2018.names.test)
+all.pit.2018.pruned.probyes <- all.pit.2018.pruned.prob
+
+# Plot the ROC curve of the Random Forest
+plot.roc.rf <- roc(all.pit.2018.names.test$ARR_DEL15, all.pit.2018.rf.probyes)
+plot(plot.roc.rf)
+
+# Add the ROC curve of the Pruned Tree t to the same plot 
+plot.roc.pruned <- roc(all.pit.2018.names.test$ARR_DEL15, all.pit.2018.pruned.probyes)
+plot(plot.roc.pruned, col = "steelblue", add = TRUE)
+
+# Print out the area under each curve
+plot.roc.rf$auc
+plot.roc.pruned$auc
+
+```
+
+####Logistic
+
+```{r}
+pit.logit <- glm(ARR_DEL15 ~ ., family = binomial(), data = all.pit.2018.nums.train)
+
+summary(pit.logit)
+
+```
+
+####LDA
+
+```{r }
+pit.lda <- lda( ARR_DEL15 ~ ., data = all.pit.2018.nums.train)
+
+summary(pit.lda)
+
+```
+
+
+####QDA
+
+```{r}
+pit.qda <- qda( as.factor(ARR_DEL15) ~ ., data = all.pit.2018.nums.train)
+
+summary(pit.qda)
+
+```
+
+
+####Naive Bayes 
+
+```{r, message=FALSE}
+pit.nb <- NaiveBayes(as.factor(ARR_DEL15) ~ ., data = all.pit.2018.nums.train, 
+                     usekernel =TRUE)
+
+summary(pit.nb)
+```
+
+
+
+### Model Selection
+
+
+> For our classification problem, we reasoned that we care more about ensuring that there are low False Negatives ( or equivalently high True Positives) and so we pick the variable with the highest Sensitivity. This is because, passengers would be happier about a flight arriving on time that they think was delayed rather than a flight getting delayed after they're assured it is on time.
+
+In this section , we take all the different fitted models and use it to find conditional probabilities P(Y = 1/X= x) for our test data inorder to compare the peformance of each of the models. The classMetrics functions gives us the confusion matrix for each method as well as the Specificity, Sensitivity and Accuracy of each model. 
+
+```{r}
+
+lda.pred <- predict(pit.lda, newdata = all.pit.2018.nums.test)$posterior
+qda.pred <-  predict(pit.qda, newdata = all.pit.2018.nums.test)$posterior
+nb.pred <- predict(pit.nb, newdata = all.pit.2018.nums.test)$posterior
+rforest.pred <- predict(all.pit.2018.rf, newdata = all.pit.2018.names.test, type="prob")
+
+logit.score <- predict(pit.logit, newdata = all.pit.2018.nums.test,type = "response") 
+lda.score <- lda.pred[,2]
+qda.score <- qda.pred[,2]
+nb.score  <- nb.pred[,2]
+rforest.score <- rforest.pred[,2]   
+
+observed <- all.pit.2018.nums.test$ARR_DEL15
+```
+
+
+
+
+
+```{r}
+
+classMetrics <- function(score, y, cutoff) {
+  
+  
+  yhat <-  rep(0,length(y))
+  for (i in 1:length(score)) {
+    if ( score[i] >= cutoff) {
+      yhat[i] = 1
+    }
+    else{
+      yhat[i] = 0
+    }
+  }
+  
+  predicted <- yhat
+  observed <- y
+  conf.mat <- table(predicted, observed) 
+  
+  TP <- sum(yhat==1 & y == 1)
+  TN <- sum(yhat == 0 & y == 0)
+  FP <- sum(yhat == 1 & y == 0)
+  FN <- sum(yhat == 0 & y== 1)
+  
+  
+  
+  total <- TP + TN + FP + FN 
+  accuracy <- (TP + TN)/total
+  sensitivity <- TP/(TP + FN)
+  specificity <- TN/(TN + FP)
+  
+  
+  perf <- setNames(c(accuracy, sensitivity,specificity),
+                   nm = c("accuracy",
+                          "sensitivity","specificity"))
+  
+  
+  
+  output <- list("conf.mat" = conf.mat, "perf" = perf)
+  
+  return(output)
+}
+
+
+
+classMetrics(logit.score, observed, cutoff = 0.5)
+classMetrics(lda.score, observed, cutoff = 0.5)
+classMetrics(qda.score, observed, cutoff = 0.5)
+classMetrics(nb.score, observed, cutoff = 0.5)
+classMetrics(rforest.score, observed, cutoff = 0.5)
+```
+
+#### We have a winner! As we can see from the above outputs, QDA provides us the highest sensitivity!
+
+
+###Final Model Fit on the selected model : QDA
+
+
+```{r}
+
+pit.qda.final <- qda( as.factor(ARR_DEL15) ~ ., data = all.pit.2018.nums)
+
+pit.qda.final$prior
+pit.qda.final$means
+
+```
+
+
+
+### Compare to 2006 (an example with random forest)
+```{r }
+# Read in the data
+all.pit.2006 <- read.csv("all_PIT_2006.csv")
+
+# Use a for loop to determine which columns should be dropped at the offset
+column.names <- names(all.pit.2006)
+
+for (i in 1:length(column.names)){
+  
+  cat("Number of NAs in", column.names[i], "is",    
+      sum(is.nan(all.pit.2006[, column.names[i]])),"\n", sep = " ")
+  
+}
+
+# Drop those columns
+all.pit.2006 <- all.pit.2006[, -which(names(all.pit.2006) %in%
+                                  c("SCH_OP_UNIQUE_CARRIER","SCH_OP_CARRIER_AIRLINE_ID",
+                                 "SCH_OP_CARRIER","SCH_OP_CARRIER_FL_NUM",
+                                 "CarrierDelay","WeatherDelay","NASDelay",
+                                "SecurityDelay","LateAircraftDelay","CancellationCode",
+                                 "X", "X.1", "DUP"))]
+
+# Omit all remaining rows that contain NAs
+all.pit.2006 <- na.omit(all.pit.2006)
+
+all.pit.2006 <- subset(all.pit.2006, Origin == "PIT")
+
+all.pit.2006$DEST_AIRPORT_ID <- all.pit.2018$DEST_AIRPORT_ID[match(all.pit.2006$Dest, all.pit.2018$DEST)]
+
+all.pit.2006 <- na.omit(all.pit.2006)
+
+all.pit.2006.nums <- all.pit.2006[,which(names(all.pit.2006) %in%
+                                  c("AirTime",
+                                    "Distance",
+                                    "DestWac",
+                                    "DepDelay",
+                                    "ArrDel15",
+                                    "DepTime",
+                                    "TaxiOut",
+                                    "Month",
+                                    "DayofMonth",
+                                    "DayOfWeek",
+                                    "Quarter",
+                                    "DEST_AIRPORT_ID"))]
+
+names(all.pit.2006.nums) = c("QUARTER", "MONTH", "DAY_OF_MONTH", "DAY_OF_WEEK", "AIR_TIME", "ARR_DEL15", "DEP_DELAY", "DEP_TIME", "DEST_WAC", "DISTANCE", "TAXI_OUT", "DEST_AIRPORT_ID")
+
+
+qda.pred.2006.prob <- predict(pit.qda.final, all.pit.2006.nums)
+
+qda.pred.2006 <- qda.pred.2006.prob$class
+
+
+conf.mat.2006 <- table(qda.pred.2006, all.pit.2006.nums$ARR_DEL15)
+
+
+sensitivity.2006 <- conf.mat.2006[2,2]/sum(conf.mat.2006[,2])
+
+
+prop.table(table(all.pit.2006.nums$ARR_DEL15))
+
+prop.table(table(all.pit.2018.nums$ARR_DEL15))
+
+
+ggplot(all.pit.2018,
+       aes(ARR_DELAY, DEP_DELAY)) + 
+  geom_jitter(color = "coral1") +
+  stat_smooth(method = "lm", col = "black", 
+              formula = y~poly(x, 2), 
+              data = all.pit.2018) +
+  guides(color = FALSE) +
+  labs(title = "Departing Delay and Arrival Delay, 2018")
+
+
+
+ggplot(all.pit.2006,
+       aes(ArrDelay, DepDelay)) + 
+  geom_jitter(color = "coral1") +
+  stat_smooth(method = "lm", col = "black", 
+              formula = y~poly(x, 2), 
+              data = all.pit.2006) +
+  guides(color = FALSE) +
+  labs(title = "Departing Delay and Arrival Delay, 2016")
+
+
+
+```
+
+
+- We used the 2018 delay model to predict delays in 2006. The model resulted in a sensitivity of `r sensitivity.2006*100`% which is less than what we obtained on the 2018 data. 
+- There are differences in the data between 2006 and 2018.  First the proportion of arrival delays has decreased from 24% in 2006 to 18% in 2018.  We also see departure delays are less correlated with arrival delays when viewing the two scatterplots side by side.  This suggests other operations in the 2006 data may be driving 2006 arrival delays that are not as significantly found in the 2018 data with which we created the model on.
+
+
+
+
+
+
